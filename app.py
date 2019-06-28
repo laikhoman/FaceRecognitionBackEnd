@@ -13,10 +13,11 @@ import threading
 from marshmallow import fields
 from marshmallow import post_load
 
+
 app = Flask(__name__)
 
 #configure images destination folder
-app.config['UPLOADED_IMAGES_DEST'] = './images'
+app.config['UPLOADED_IMAGES_DEST'] = 'images'
 images = UploadSet('images', IMAGES)
 configure_uploads(app, images)
 
@@ -75,6 +76,7 @@ users_schema = UserSchema(many=True)
 model_schema = ModelSchema()
 models_schema = ModelSchema(many=True)
 db.create_all()
+# db.drop_all()
 
 #error handlers
 @app.errorhandler(404)
@@ -88,7 +90,8 @@ def not_found(error):
 
 @app.route("/face-recognition/api/v1.0/user/register", methods=['POST'])
 def register_user():
-    if not request.form or not 'name' in request.form:
+    print(request.form.keys())
+    if not request.form or not 'name' in request.form.keys():
         return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Name is required'}), 400)
     else:
         name = request.form['name']
@@ -98,8 +101,8 @@ def register_user():
         newuser = User(name, position)
         db.session.add(newuser)
         db.session.commit()
-        if 'photos' in request.files:
-            uploaded_images = request.files.getlist('photos')
+        if 'photos[]' in request.files.keys():
+            uploaded_images = request.files.getlist('photos[]')
             save_images_to_folder(uploaded_images, newuser)
         return jsonify({'status': 'success', 'user': user_schema.dump(newuser).data})
 
@@ -114,10 +117,10 @@ def save_images_to_folder(images_to_save, user):
     model = Model.query.order_by(Model.version.desc()).first()
     if model is not None:
         # increment the version
-        Queue.put(model.version + 1)
+        Queue().put(model.version + 1)
     else:
         # create first version
-        Queue.put(1)
+        Queue().put(1)
 
 @app.route("/face-recognition/api/v1.0/model/info" , methods=['GET'])
 def get_model_info():
@@ -138,4 +141,6 @@ if __name__ == '__main__':
 
 # configure logging
 logging.basicConfig(level=logging.DEBUG, format='[%(levelname)s] - %(threadName)-10s : %(message)s')
+
+
 
