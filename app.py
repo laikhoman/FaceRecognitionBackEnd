@@ -1,7 +1,8 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, g, url_for
 from flask_uploads import UploadSet, IMAGES, configure_uploads
 from flask import make_response
 from flask_sqlalchemy import SQLAlchemy
+from flask_httpauth import HTTPBasicAuth
 from flask_marshmallow import Marshmallow
 import sys
 from queue import Queue
@@ -12,7 +13,9 @@ from flask import send_from_directory
 import threading
 from marshmallow import fields
 from marshmallow import post_load
-
+from passlib.apps import custom_app_context as pwd_context
+from itsdangerous import (TimedJSONWebSignatureSerializer
+                          as Serializer, BadSignature, SignatureExpired)
 
 app = Flask(__name__)
 
@@ -26,6 +29,7 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'facerecognition.sqlite')
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
+auth = HTTPBasicAuth()
 
 #model / users is a many to many relationship, that means there's a third #table containing user id and model id
 
@@ -45,18 +49,55 @@ class Model(db.Model):
 # user table
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    name = db.Column(db.String(300))
-    position = db.Column(db.String(300))
+    email = db.Column(db.String(100))
+    name = db.Column(db.String(100))
+    position = db.Column(db.String(50))
 
-    def __init__(self, name, position):
+    password_hash = db.Column(db.String(128))
+
+    def __init__(self, email, name, position):
+        self.email = email
         self.name = name
         self.position = position
 
+    def hash_password(self, password):
+        self.password_hash = pwd_context.encrypt(password)
+
+    def verify_password(self, password):
+        return pwd_context.verify(password, self.password_hash)
+
+    def generate_auth_token(self, expiration = 600):
+        s = Serializer(app.config['SECRET_KEY'], expires_in=expiration)
+        return s.dumps({'id': self.id})
+
+    @staticmethod
+    def verify_auth_token(token):
+        s = Serializer(app.config['SECRET_KEY'])
+        try:
+            data = s.loads(token)
+        except SignatureExpired:
+            return None
+        except BadSignature:
+            return None
+        user = User.query.get(data['id'])
+        return user
+
+@auth.verify_password
+def verify_password(email_or_token, password):
+    # first try to authenticate by token
+    user = User.verify_auth_token(email_or_token)
+    if not user:
+        # try to authenticate with username/password
+        user = User.query.filter_by(email=email_or_token).first()
+        if not user or not user.verify_password(password):
+            return False
+    g.user = user
+    return True
 
 # user schema
 class UserSchema(ma.Schema):
     class Meta:
-        fields = ('id', 'name', 'position')
+        fields = ('id', 'email', 'name', 'position')
 
 
 # model schema
@@ -88,17 +129,39 @@ def not_found(error):
     return make_response(jsonify({'error': 'bad request'}), 400)
 
 
+@app.route('/face-recognition/api/v1.0/token', methods=['GET'])
+@auth.login_required
+def get_auth_token():
+    token = g.user.generate_auth_token()
+    return jsonify({ 'token': token.decode('ascii') })
+
 @app.route("/face-recognition/api/v1.0/user/register", methods=['POST'])
 def register_user():
     print(request.form.keys())
-    if not request.form or not 'name' in request.form.keys():
+    if not request.form:
+        return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'All Fields are empty'}), 400)
+    elif not 'email' in request.form.keys():
+        return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Email is required'}), 400)
+    elif not 'name' in request.form.keys():
         return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Name is required'}), 400)
+    elif not 'password' in request.form.keys():
+        return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Password is required'}), 400)
+    elif not 'confirmPassword' in request.form.keys():
+        return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Confirm Password is required'}), 400)
     else:
+        email = request.form['email']
         name = request.form['name']
+        password = request.form['password']
+        confirmPassword = request.form['confirmPassword']
         position = request.form.get('position')
+        if User.query.filter_by(email=email).first() is not None:
+            return make_response(jsonify({'status': 'failed', 'message:': 'Email has been used'}), 400)
+        if password != confirmPassword :
+            return make_response(jsonify({'status': 'failed', 'message:': 'Password is not same with confirmation password'}), 400)
         if position is None:
             position = ""
-        newuser = User(name, position)
+        newuser = User(email, name, position)
+        newuser.hash_password(password)
         db.session.add(newuser)
         db.session.commit()
         if 'photos[]' in request.files.keys():
