@@ -26,7 +26,8 @@ configure_uploads(app, images)
 
 #configure sqlite database
 basedir = os.path.abspath(os.path.dirname(__file__))
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'facerecognition.sqlite')
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'facerecognition1.sqlite')
+app.config['SECRET_KEY'] = 'test1234'
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
 auth = HTTPBasicAuth()
@@ -49,14 +50,14 @@ class Model(db.Model):
 # user table
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String(100))
+    username = db.Column(db.String(100))
     name = db.Column(db.String(100))
     position = db.Column(db.String(50))
 
     password_hash = db.Column(db.String(128))
 
-    def __init__(self, email, name, position):
-        self.email = email
+    def __init__(self, username, name, position):
+        self.username = username
         self.name = name
         self.position = position
 
@@ -66,29 +67,32 @@ class User(db.Model):
     def verify_password(self, password):
         return pwd_context.verify(password, self.password_hash)
 
-    def generate_auth_token(self, expiration = 600):
+    def generate_auth_token(self, expiration = 3600):
         s = Serializer(app.config['SECRET_KEY'], expires_in=expiration)
         return s.dumps({'id': self.id})
 
     @staticmethod
     def verify_auth_token(token):
-        s = Serializer(app.config['SECRET_KEY'])
+        s = Serializer(app.config['SECRET_KEY'], expires_in=3600)
         try:
             data = s.loads(token)
         except SignatureExpired:
+            print('Signature Expired')
             return None
         except BadSignature:
+            print('Bad Signature')
             return None
         user = User.query.get(data['id'])
         return user
 
+
 @auth.verify_password
-def verify_password(email_or_token, password):
+def verify_password(username_or_token, password):
     # first try to authenticate by token
-    user = User.verify_auth_token(email_or_token)
+    user = User.verify_auth_token(username_or_token)
     if not user:
         # try to authenticate with username/password
-        user = User.query.filter_by(email=email_or_token).first()
+        user = User.query.filter_by(username=username_or_token).first()
         if not user or not user.verify_password(password):
             return False
     g.user = user
@@ -97,7 +101,7 @@ def verify_password(email_or_token, password):
 # user schema
 class UserSchema(ma.Schema):
     class Meta:
-        fields = ('id', 'email', 'name', 'position')
+        fields = ('id', 'username', 'name', 'position')
 
 
 # model schema
@@ -129,7 +133,32 @@ def not_found(error):
     return make_response(jsonify({'error': 'bad request'}), 400)
 
 
-@app.route('/face-recognition/api/v1.0/token', methods=['GET'])
+@app.route("/face-recognition/api/v1.0/login", methods=['POST'])
+def login():
+    if not request.form:
+        return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'All Fields are empty'}), 400)
+    elif not 'username' in request.form.keys():
+        return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Username is required'}), 400)
+    elif not 'password' in request.form.keys():
+        return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Password is required'}), 400)
+    else:
+        username = request.form.get('username')
+        password = request.form.get('password')
+        user = User.query.filter_by(username=username).first()
+        # check if user actually exists
+        # take the user supplied password, hash it, and compare it to the hashed password in database
+        if not user :
+            return make_response(jsonify({'status': 'failed', 'message:': 'Username not exists'}), 400)
+        elif not user.verify_password(password):
+            return make_response(jsonify({'status': 'failed', 'message:': 'Password is wrong'}), 400)
+        # if the above check passes, then we know the user has the right credentials
+        g.user = user
+        token = g.user.generate_auth_token()
+        return jsonify({'token': token.decode('ascii')})
+
+
+
+@app.route('/face-recognition/api/v1.0/token')
 @auth.login_required
 def get_auth_token():
     token = g.user.generate_auth_token()
@@ -140,8 +169,8 @@ def register_user():
     print(request.form.keys())
     if not request.form:
         return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'All Fields are empty'}), 400)
-    elif not 'email' in request.form.keys():
-        return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Email is required'}), 400)
+    elif not 'username' in request.form.keys():
+        return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Username is required'}), 400)
     elif not 'name' in request.form.keys():
         return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Name is required'}), 400)
     elif not 'password' in request.form.keys():
@@ -149,18 +178,18 @@ def register_user():
     elif not 'confirmPassword' in request.form.keys():
         return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'Confirm Password is required'}), 400)
     else:
-        email = request.form['email']
+        username = request.form['username']
         name = request.form['name']
         password = request.form['password']
         confirmPassword = request.form['confirmPassword']
         position = request.form.get('position')
-        if User.query.filter_by(email=email).first() is not None:
-            return make_response(jsonify({'status': 'failed', 'message:': 'Email has been used'}), 400)
+        if User.query.filter_by(username=username).first() is not None:
+            return make_response(jsonify({'status': 'failed', 'message:': 'Username or email has been used'}), 400)
         if password != confirmPassword :
             return make_response(jsonify({'status': 'failed', 'message:': 'Password is not same with confirmation password'}), 400)
         if position is None:
             position = ""
-        newuser = User(email, name, position)
+        newuser = User(username, name, position)
         newuser.hash_password(password)
         db.session.add(newuser)
         db.session.commit()
@@ -184,6 +213,11 @@ def save_images_to_folder(images_to_save, user):
     else:
         # create first version
         Queue().put(1)
+
+@app.route('/face-recognition/api/v1.0/resource')
+@auth.login_required
+def get_resource():
+    return jsonify({ 'data': 'Hello, %s!' % g.user.username })
 
 @app.route("/face-recognition/api/v1.0/model/info" , methods=['GET'])
 def get_model_info():
