@@ -1,0 +1,9 @@
+flask
+flask_restful
+flask_httpauth
+flask_uploads
+flask_sqlalchemy
+flask_marshmallow
+itsdangerous
+PyJWT
+passlib

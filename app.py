@@ -16,6 +16,8 @@ from marshmallow import post_load
 from passlib.apps import custom_app_context as pwd_context
 from itsdangerous import (TimedJSONWebSignatureSerializer
                           as Serializer, BadSignature, SignatureExpired)
+import jwt
+import datetime
 
 app = Flask(__name__)
 
@@ -67,23 +69,43 @@ class User(db.Model):
     def verify_password(self, password):
         return pwd_context.verify(password, self.password_hash)
 
-    def generate_auth_token(self, expiration = 3600):
-        s = Serializer(app.config['SECRET_KEY'], expires_in=expiration)
-        return s.dumps({'id': self.id})
+    def generate_auth_token(self, user_id, expiration = 3600):
+        """
+        Generates the Auth Token
+        :return: string
+        """
+        try:
+            payload = {
+                'exp': datetime.datetime.utcnow() + datetime.timedelta(days=0, seconds=expiration),
+                'iat': datetime.datetime.utcnow(),
+                'sub': user_id
+            }
+            return jwt.encode(
+                payload,
+                app.config.get('SECRET_KEY'),
+                algorithm='HS256'
+            )
+        except Exception as e:
+            return e
 
     @staticmethod
     def verify_auth_token(token):
-        s = Serializer(app.config['SECRET_KEY'], expires_in=3600)
+        """
+        Validates the auth token
+        :param auth_token:
+        :return: integer|string
+        """
         try:
-            data = s.loads(token)
-        except SignatureExpired:
-            print('Signature Expired')
-            return None
-        except BadSignature:
-            print('Bad Signature')
-            return None
-        user = User.query.get(data['id'])
-        return user
+            payload = jwt.decode(token, app.config.get('SECRET_KEY'))
+            is_blacklisted_token = BlacklistToken.check_blacklist(token)
+            if is_blacklisted_token:
+                return 'Token blacklisted. Please log in again.'
+            else:
+                return payload['sub']
+        except jwt.ExpiredSignatureError:
+            return 'Signature expired. Please log in again.'
+        except jwt.InvalidTokenError:
+            return 'Invalid token. Please log in again.'
 
 
 @auth.verify_password
@@ -97,6 +119,32 @@ def verify_password(username_or_token, password):
             return False
     g.user = user
     return True
+
+class BlacklistToken(db.Model):
+    """
+    Token Model for storing JWT tokens
+    """
+    __tablename__ = 'blacklist_tokens'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    token = db.Column(db.String(500), unique=True, nullable=False)
+    blacklisted_on = db.Column(db.DateTime, nullable=False)
+
+    def __init__(self, token):
+        self.token = token
+        self.blacklisted_on = datetime.datetime.now()
+
+    def __repr__(self):
+        return '<id: token: {}'.format(self.token)
+
+    @staticmethod
+    def check_blacklist(auth_token):
+        # check whether auth token has been blacklisted
+        res = BlacklistToken.query.filter_by(token=str(auth_token)).first()
+        if res:
+            return True
+        else:
+            return False
 
 # user schema
 class UserSchema(ma.Schema):
@@ -153,7 +201,7 @@ def login():
             return make_response(jsonify({'status': 'failed', 'message:': 'Password is wrong'}), 400)
         # if the above check passes, then we know the user has the right credentials
         g.user = user
-        token = g.user.generate_auth_token()
+        token = g.user.generate_auth_token(user.id)
         return jsonify({'token': token.decode('ascii')})
 
 
