@@ -4,6 +4,7 @@ from flask import make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_httpauth import HTTPBasicAuth
 from flask_marshmallow import Marshmallow
+import turicreate as tc
 import sys
 from queue import Queue
 import os
@@ -14,8 +15,6 @@ import threading
 from marshmallow import fields
 from marshmallow import post_load
 from passlib.apps import custom_app_context as pwd_context
-from itsdangerous import (TimedJSONWebSignatureSerializer
-                          as Serializer, BadSignature, SignatureExpired)
 import jwt
 import datetime
 
@@ -27,8 +26,10 @@ images = UploadSet('images', IMAGES)
 configure_uploads(app, images)
 
 #configure sqlite database
+DATABASE_NAME = 'facerecognition1.sqlite'
+
 basedir = os.path.abspath(os.path.dirname(__file__))
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'facerecognition1.sqlite')
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, DATABASE_NAME)
 app.config['SECRET_KEY'] = 'test1234'
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
@@ -168,7 +169,9 @@ user_schema = UserSchema()
 users_schema = UserSchema(many=True)
 model_schema = ModelSchema()
 models_schema = ModelSchema(many=True)
-db.create_all()
+
+if(not os.path.exists(DATABASE_NAME)):
+    db.create_all()
 # db.drop_all()
 
 #error handlers
@@ -177,7 +180,7 @@ def not_found(error):
     return make_response(jsonify({'error': 'not found'}), 404)
 
 @app.errorhandler(400)
-def not_found(error):
+def bad_request(error):
     return make_response(jsonify({'error': 'bad request'}), 400)
 
 
@@ -276,10 +279,65 @@ def get_model_info():
     else:
         return jsonify({'status' : 'success', 'model' : model_schema.dump(model).data})
 
+#serve models
+@app.route('/models/')
+def download(filename):
+    return send_from_directory('models', filename, as_attachment=True)
+
+def train_model():
+    while True:
+        #get the next version
+        version = queue.get()
+        logging.debug('loading images')
+        data = tc.image_analysis.load_images('images', with_path=True)
+
+        # From the path-name, create a label column
+        data['label'] = data['path'].apply(lambda path: path.split('/')[-2])
+
+        # use the model version to construct a filename
+        filename = 'Faces_v' + str(version)
+        mlmodel_filename = filename + '.mlmodel'
+        models_folder = 'models/'
+
+        # Save the data for future use
+        data.save(models_folder + filename + '.sframe')
+
+        result_data = tc.SFrame( models_folder + filename +'.sframe')
+        train_data = result_data.random_split(0.8)
+
+        #the next line starts the training process
+        model = tc.image_classifier.create(train_data, target='label', model='resnet-50', verbose=True)
+
+        db.session.commit()
+        logging.debug('saving model')
+        model.save( models_folder + filename + '.model')
+        logging.debug('saving coremlmodel')
+        model.export_coreml(models_folder + mlmodel_filename)
+
+        # save model data in database
+        modelData = Model()
+        modelData.url = models_folder + mlmodel_filename
+        classes = model.classes
+        for userId in classes:
+            user = User.query.get(userId)
+            if user is not None:
+                modelData.users.append(user)
+        db.session.add(modelData)
+        db.session.commit()
+        logging.debug('done creating model')
+        # mark this task as done
+        queue.task_done()
+
 @app.route('/')
 def hello_world():
     return 'Hello World!'
 
+
+#configure queue for training models
+queue = Queue(maxsize=0)
+thread = threading.Thread(target=train_model, name='TrainingDaemon')
+thread.setDaemon(False)
+thread.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5005, debug=True)
