@@ -4,6 +4,7 @@ from flask import make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_httpauth import HTTPBasicAuth
 from flask_marshmallow import Marshmallow
+import turicreate as tc
 import sys
 from queue import Queue
 import os
@@ -14,8 +15,8 @@ import threading
 from marshmallow import fields
 from marshmallow import post_load
 from passlib.apps import custom_app_context as pwd_context
-from itsdangerous import (TimedJSONWebSignatureSerializer
-                          as Serializer, BadSignature, SignatureExpired)
+import jwt
+import datetime
 
 app = Flask(__name__)
 
@@ -25,8 +26,10 @@ images = UploadSet('images', IMAGES)
 configure_uploads(app, images)
 
 #configure sqlite database
+DATABASE_NAME = 'facerecognition1.sqlite'
+
 basedir = os.path.abspath(os.path.dirname(__file__))
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, 'facerecognition1.sqlite')
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///' + os.path.join(basedir, DATABASE_NAME)
 app.config['SECRET_KEY'] = 'test1234'
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
@@ -67,23 +70,43 @@ class User(db.Model):
     def verify_password(self, password):
         return pwd_context.verify(password, self.password_hash)
 
-    def generate_auth_token(self, expiration = 3600):
-        s = Serializer(app.config['SECRET_KEY'], expires_in=expiration)
-        return s.dumps({'id': self.id})
+    def generate_auth_token(self, user_id, expiration = 3600):
+        """
+        Generates the Auth Token
+        :return: string
+        """
+        try:
+            payload = {
+                'exp': datetime.datetime.utcnow() + datetime.timedelta(days=0, seconds=expiration),
+                'iat': datetime.datetime.utcnow(),
+                'sub': user_id
+            }
+            return jwt.encode(
+                payload,
+                app.config.get('SECRET_KEY'),
+                algorithm='HS256'
+            )
+        except Exception as e:
+            return e
 
     @staticmethod
     def verify_auth_token(token):
-        s = Serializer(app.config['SECRET_KEY'], expires_in=3600)
+        """
+        Validates the auth token
+        :param auth_token:
+        :return: integer|string
+        """
         try:
-            data = s.loads(token)
-        except SignatureExpired:
-            print('Signature Expired')
-            return None
-        except BadSignature:
-            print('Bad Signature')
-            return None
-        user = User.query.get(data['id'])
-        return user
+            payload = jwt.decode(token, app.config.get('SECRET_KEY'))
+            is_blacklisted_token = BlacklistToken.check_blacklist(token)
+            if is_blacklisted_token:
+                return 'Token blacklisted. Please log in again.'
+            else:
+                return payload['sub']
+        except jwt.ExpiredSignatureError:
+            return 'Signature expired. Please log in again.'
+        except jwt.InvalidTokenError:
+            return 'Invalid token. Please log in again.'
 
 
 @auth.verify_password
@@ -97,6 +120,32 @@ def verify_password(username_or_token, password):
             return False
     g.user = user
     return True
+
+class BlacklistToken(db.Model):
+    """
+    Token Model for storing JWT tokens
+    """
+    __tablename__ = 'blacklist_tokens'
+
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    token = db.Column(db.String(500), unique=True, nullable=False)
+    blacklisted_on = db.Column(db.DateTime, nullable=False)
+
+    def __init__(self, token):
+        self.token = token
+        self.blacklisted_on = datetime.datetime.now()
+
+    def __repr__(self):
+        return '<id: token: {}'.format(self.token)
+
+    @staticmethod
+    def check_blacklist(auth_token):
+        # check whether auth token has been blacklisted
+        res = BlacklistToken.query.filter_by(token=str(auth_token)).first()
+        if res:
+            return True
+        else:
+            return False
 
 # user schema
 class UserSchema(ma.Schema):
@@ -120,7 +169,9 @@ user_schema = UserSchema()
 users_schema = UserSchema(many=True)
 model_schema = ModelSchema()
 models_schema = ModelSchema(many=True)
-db.create_all()
+
+if(not os.path.exists(DATABASE_NAME)):
+    db.create_all()
 # db.drop_all()
 
 #error handlers
@@ -129,7 +180,7 @@ def not_found(error):
     return make_response(jsonify({'error': 'not found'}), 404)
 
 @app.errorhandler(400)
-def not_found(error):
+def bad_request(error):
     return make_response(jsonify({'error': 'bad request'}), 400)
 
 
@@ -153,7 +204,7 @@ def login():
             return make_response(jsonify({'status': 'failed', 'message:': 'Password is wrong'}), 400)
         # if the above check passes, then we know the user has the right credentials
         g.user = user
-        token = g.user.generate_auth_token()
+        token = g.user.generate_auth_token(user.id)
         return jsonify({'token': token.decode('ascii')})
 
 
@@ -228,10 +279,65 @@ def get_model_info():
     else:
         return jsonify({'status' : 'success', 'model' : model_schema.dump(model).data})
 
+#serve models
+@app.route('/models/')
+def download(filename):
+    return send_from_directory('models', filename, as_attachment=True)
+
+def train_model():
+    while True:
+        #get the next version
+        version = queue.get()
+        logging.debug('loading images')
+        data = tc.image_analysis.load_images('images', with_path=True)
+
+        # From the path-name, create a label column
+        data['label'] = data['path'].apply(lambda path: path.split('/')[-2])
+
+        # use the model version to construct a filename
+        filename = 'Faces_v' + str(version)
+        mlmodel_filename = filename + '.mlmodel'
+        models_folder = 'models/'
+
+        # Save the data for future use
+        data.save(models_folder + filename + '.sframe')
+
+        result_data = tc.SFrame( models_folder + filename +'.sframe')
+        train_data = result_data.random_split(0.8)
+
+        #the next line starts the training process
+        model = tc.image_classifier.create(train_data, target='label', model='resnet-50', verbose=True)
+
+        db.session.commit()
+        logging.debug('saving model')
+        model.save( models_folder + filename + '.model')
+        logging.debug('saving coremlmodel')
+        model.export_coreml(models_folder + mlmodel_filename)
+
+        # save model data in database
+        modelData = Model()
+        modelData.url = models_folder + mlmodel_filename
+        classes = model.classes
+        for userId in classes:
+            user = User.query.get(userId)
+            if user is not None:
+                modelData.users.append(user)
+        db.session.add(modelData)
+        db.session.commit()
+        logging.debug('done creating model')
+        # mark this task as done
+        queue.task_done()
+
 @app.route('/')
 def hello_world():
     return 'Hello World!'
 
+
+#configure queue for training models
+queue = Queue(maxsize=0)
+thread = threading.Thread(target=train_model, name='TrainingDaemon')
+thread.setDaemon(False)
+thread.start()
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5005, debug=True)
