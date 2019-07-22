@@ -17,6 +17,7 @@ from marshmallow import post_load
 from passlib.apps import custom_app_context as pwd_context
 import jwt
 import datetime
+import cv2
 
 app = Flask(__name__)
 
@@ -283,6 +284,51 @@ def get_model_info():
 @app.route('/models/')
 def download(filename):
     return send_from_directory('models', filename, as_attachment=True)
+
+def detectAndCropFaceImage(imagePath, width, height, confidenceValue):
+    image = cv2.imread(imagePath)
+    image = imutils.resize(image, width=width)
+    (h, w) = image.shape[:2]
+
+    # construct a blob from the image
+    imageBlob = cv2.dnn.blobFromImage(
+        cv2.resize(image, (width, height)), 1.0, (width, height),
+        (104.0, 177.0, 123.0), swapRB=False, crop=False)
+
+    # apply OpenCV's deep learning-based face detector to localize
+    # faces in the input image
+
+    protoPath = os.path.join(basedir, "deploy.prototxt")
+    modelPath = os.path.join(basedir, "res10_300x300_ssd_iter_140000.caffemodel")
+    detector = cv2.dnn.readNetFromCaffe(protoPath, modelPath)
+    detector.setInput(imageBlob)
+    detections = detector.forward()
+
+    # ensure at least one face was found
+    if len(detections) > 0:
+        # we're making the assumption that each image has only ONE
+        # face, so find the bounding box with the largest probability
+        i = np.argmax(detections[0, 0, :, 2])
+        confidence = detections[0, 0, i, 2]
+
+        # ensure that the detection with the largest probability also
+        # means our minimum probability test (thus helping filter out
+        # weak detections)
+        if confidence > confidenceValue:
+            # compute the (x, y)-coordinates of the bounding box for
+            # the face
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
+
+            # extract the face ROI and grab the ROI dimensions
+            face = image[startY:endY, startX:endX]
+            (fH, fW) = face.shape[:2]
+
+            # ensure the face width and height are sufficiently large
+            if fW < 20 or fH < 20:
+                return
+
+            return face
 
 def train_model():
     while True:
