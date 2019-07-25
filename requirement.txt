@@ -10,4 +10,5 @@ tensorflow-gpu==1.14
 scikit-learn==0.18.2
 scipy==0.19.1
 numpy
-turicreate
+jwt
+opencv-python==4.1.0.25

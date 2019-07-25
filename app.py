@@ -4,7 +4,7 @@ from flask import make_response
 from flask_sqlalchemy import SQLAlchemy
 from flask_httpauth import HTTPBasicAuth
 from flask_marshmallow import Marshmallow
-import turicreate as tc
+#import turicreate as tc
 import sys
 from queue import Queue
 import os
@@ -18,6 +18,8 @@ from passlib.apps import custom_app_context as pwd_context
 import jwt
 import datetime
 import cv2
+import numpy as np
+import imutils
 
 app = Flask(__name__)
 
@@ -35,6 +37,8 @@ app.config['SECRET_KEY'] = 'test1234'
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
 auth = HTTPBasicAuth()
+extList = []
+fileNameList = []
 
 #model / users is a many to many relationship, that means there's a third #table containing user id and model id
 
@@ -218,7 +222,6 @@ def get_auth_token():
 
 @app.route("/face-recognition/api/v1.0/user/register", methods=['POST'])
 def register_user():
-    print(request.form.keys())
     if not request.form:
         return make_response(jsonify({'status': 'failed', 'error': 'bad request', 'message:': 'All Fields are empty'}), 400)
     elif not 'username' in request.form.keys():
@@ -247,15 +250,44 @@ def register_user():
         db.session.commit()
         if 'photos[]' in request.files.keys():
             uploaded_images = request.files.getlist('photos[]')
-            save_images_to_folder(uploaded_images, newuser)
+            save_images_to_folder(uploaded_images, newuser, "register")
         return jsonify({'status': 'success', 'user': user_schema.dump(newuser).data})
 
 
 # function to save images to image directory
-def save_images_to_folder(images_to_save, user):
+def save_images_to_folder(images_to_save, user, mode):
+    extList = []
+    fileNameList = []
     for a_file in images_to_save:
         # save images to images folder using user id as a subfolder name
-        images.save(a_file, str(user.id), str(uuid.uuid4()) + '.')
+        uniqueUUID = str(uuid.uuid4())
+        images.save(a_file, str(user.id), uniqueUUID + '.')
+
+        dirname = os.path.dirname(__file__)
+        path = os.path.join(dirname, 'images/' + str(user.id))
+        # get extension
+        for filename in os.listdir(path):
+            if os.path.splitext(filename)[-2].lower() == uniqueUUID:
+                ext = os.path.splitext(filename)[-1].lower()
+                extList.append(ext)
+                fileNameList.append(filename)
+
+
+    # detect & crop image
+
+    if mode == "register":
+        dirname = os.path.dirname(__file__)
+        path = os.path.join(dirname, 'images/' + str(user.id))
+        for filename in os.listdir(path):
+            if filename.endswith('.png') or filename.endswith('.jpeg') or filename.endswith('.jpg'):
+                ext = os.path.splitext(filename)[-1].lower()
+                detectAndCropFaceImage('images/' + str(user.id) + '/' + filename, ext, 300, 300, 0.6, user.id, '')
+    elif mode == "addPhotos":
+        j = 0
+        for image in images_to_save:
+            #detectAndCropFaceImage('', '', image, 300, 300, 0.6, user.id, extList[j])
+            detectAndCropFaceImage('images/' + str(user.id) + '/' + fileNameList[j], '', 300, 300, 0.6, user.id, extList[j])
+            j = j+1
 
     # get the last trained model
     model = Model.query.order_by(Model.version.desc()).first()
@@ -265,6 +297,23 @@ def save_images_to_folder(images_to_save, user):
     else:
         # create first version
         Queue().put(1)
+
+@app.route('/face-recognition/api/v1.0/user/add_more_photo', methods=['POST'])
+@auth.login_required
+def add_more_photo():
+    if not request.form:
+        return make_response(jsonify({'status': 'failed', 'message:': 'All Fields are empty'}), 400)
+    elif not 'username' in request.form.keys():
+        return make_response(jsonify({'status': 'failed', 'message:': 'Username is required'}), 400)
+    elif not 'photos[]' in request.files.keys():
+        return make_response(jsonify({'status': 'failed', 'message': 'No photos uploaded'}), 400)
+    else:
+        username = request.form['username']
+        user = User.query.filter_by(username=username).first()
+        uploaded_images = request.files.getlist('photos[]')
+        save_images_to_folder(uploaded_images, user, "addPhotos")
+        return jsonify({'status': 'success', 'info': 'photo(s) added'})
+
 
 @app.route('/face-recognition/api/v1.0/resource')
 @auth.login_required
@@ -280,14 +329,19 @@ def get_model_info():
     else:
         return jsonify({'status' : 'success', 'model' : model_schema.dump(model).data})
 
-#serve models
+# serve models
 @app.route('/models/')
 def download(filename):
     return send_from_directory('models', filename, as_attachment=True)
 
-def detectAndCropFaceImage(imagePath, width, height, confidenceValue):
-    image = cv2.imread(imagePath)
-    image = imutils.resize(image, width=width)
+def detectAndCropFaceImage(imagePath, ext, width, height, confidenceValue, userID, extension):
+    imageData = None
+    if extension != '':
+        imageData = cv2.imread(imagePath)
+    else:
+        imageData = cv2.imread(imagePath)
+
+    image = imutils.resize(imageData, width=width)
     (h, w) = image.shape[:2]
 
     # construct a blob from the image
@@ -310,7 +364,6 @@ def detectAndCropFaceImage(imagePath, width, height, confidenceValue):
         # face, so find the bounding box with the largest probability
         i = np.argmax(detections[0, 0, :, 2])
         confidence = detections[0, 0, i, 2]
-
         # ensure that the detection with the largest probability also
         # means our minimum probability test (thus helping filter out
         # weak detections)
@@ -323,12 +376,23 @@ def detectAndCropFaceImage(imagePath, width, height, confidenceValue):
             # extract the face ROI and grab the ROI dimensions
             face = image[startY:endY, startX:endX]
             (fH, fW) = face.shape[:2]
-
             # ensure the face width and height are sufficiently large
             if fW < 20 or fH < 20:
                 return
 
+            if extension != '':
+                saveDetectedCropImage(userID, extension, face)
+            else:
+                saveDetectedCropImage(userID, ext, face)
             return face
+
+def saveDetectedCropImage(userID, ext, face):
+    dirname = os.path.dirname(__file__)
+    #path = os.path.join(dirname, 'detectedCropImage/')
+    if not os.path.exists('detectedCropImage/' + str(userID)):
+        os.makedirs('detectedCropImage/' + str(userID))
+    cv2.imwrite(os.path.join(dirname, 'detectedCropImage/' + str(userID) + '/' + str(uuid.uuid4()) + ext), face)
+    cv2.waitKey(0)
 
 def train_model():
     while True:
