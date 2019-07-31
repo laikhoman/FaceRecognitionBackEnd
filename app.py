@@ -20,6 +20,11 @@ import datetime
 import cv2
 import numpy as np
 import imutils
+import dataset
+import tensorflow as tf
+from tensorflow import set_random_seed
+import train
+set_random_seed(2)
 
 app = Flask(__name__)
 
@@ -37,8 +42,30 @@ app.config['SECRET_KEY'] = 'test1234'
 db = SQLAlchemy(app)
 ma = Marshmallow(app)
 auth = HTTPBasicAuth()
+
 extList = []
 fileNameList = []
+testingFileName = ""
+
+train_path = 'detectedCropImage'
+img_size = 128
+num_channels = 3
+classes = os.listdir('detectedCropImage')
+validation_size = 0.2
+batch_size = 1
+total_iterations = 0
+
+##Network graph params
+filter_size_conv1 = 3
+num_filters_conv1 = 32
+
+filter_size_conv2 = 3
+num_filters_conv2 = 32
+
+filter_size_conv3 = 3
+num_filters_conv3 = 64
+
+fc_layer_size = 128
 
 #model / users is a many to many relationship, that means there's a third #table containing user id and model id
 
@@ -258,20 +285,32 @@ def register_user():
 def save_images_to_folder(images_to_save, user, mode):
     extList = []
     fileNameList = []
+    testingFileName = ""
     for a_file in images_to_save:
         # save images to images folder using user id as a subfolder name
-        uniqueUUID = str(uuid.uuid4())
-        images.save(a_file, str(user.id), uniqueUUID + '.')
+        path = ""
+        if mode == "register" or mode == "addPhotos" :
+            uniqueUUID = str(uuid.uuid4())
+            images.save(a_file, str(user.id), uniqueUUID + '.')
+            dirname = os.path.dirname(__file__)
+            path = os.path.join(dirname, 'images/' + str(user.id))
+        elif mode == "test":
+            uniqueUUID = str(uuid.uuid4())
+            ext = os.path.splitext(a_file.filename)[1][1:]
+            extList.append(ext)
+            dirname = os.path.dirname(__file__)
+            path = os.path.join(dirname, 'testingImages/'+ str(user.id))
+            if not os.path.exists('testingImages/' + str(user.id)):
+                os.makedirs('testingImages/' + str(user.id))
+            a_file.save(os.path.join(dirname, 'testingImages/'+ str(user.id) + '/' + uniqueUUID + '.' + ext))
 
-        dirname = os.path.dirname(__file__)
-        path = os.path.join(dirname, 'images/' + str(user.id))
-        # get extension
+        # get extension and filenameList
         for filename in os.listdir(path):
             if os.path.splitext(filename)[-2].lower() == uniqueUUID:
                 ext = os.path.splitext(filename)[-1].lower()
-                extList.append(ext)
+                if mode == "register" or mode == "addPhotos" :
+                    extList.append(ext)
                 fileNameList.append(filename)
-
 
     # detect & crop image
 
@@ -281,13 +320,17 @@ def save_images_to_folder(images_to_save, user, mode):
         for filename in os.listdir(path):
             if filename.endswith('.png') or filename.endswith('.jpeg') or filename.endswith('.jpg'):
                 ext = os.path.splitext(filename)[-1].lower()
-                detectAndCropFaceImage('images/' + str(user.id) + '/' + filename, ext, 300, 300, 0.6, user.id, '')
+                detectAndCropFaceImage('images/' + str(user.id) + '/' + filename, ext, 300, 300, 0.6, user.id, '', mode)
     elif mode == "addPhotos":
         j = 0
         for image in images_to_save:
-            #detectAndCropFaceImage('', '', image, 300, 300, 0.6, user.id, extList[j])
-            detectAndCropFaceImage('images/' + str(user.id) + '/' + fileNameList[j], '', 300, 300, 0.6, user.id, extList[j])
+            detectAndCropFaceImage('images/' + str(user.id) + '/' + fileNameList[j], '', 300, 300, 0.6, user.id, extList[j], mode)
             j = j+1
+    elif mode == "test":
+        j = 0
+        for image in images_to_save:
+            detectAndCropFaceImage('testingImages/' + str(user.id) + '/' + fileNameList[j], '', 300, 300, 0.6, user.id,extList[j], mode)
+            j = j + 1
 
     # get the last trained model
     model = Model.query.order_by(Model.version.desc()).first()
@@ -334,7 +377,7 @@ def get_model_info():
 def download(filename):
     return send_from_directory('models', filename, as_attachment=True)
 
-def detectAndCropFaceImage(imagePath, ext, width, height, confidenceValue, userID, extension):
+def detectAndCropFaceImage(imagePath, ext, width, height, confidenceValue, userID, extension, mode):
     imageData = None
     if extension != '':
         imageData = cv2.imread(imagePath)
@@ -379,11 +422,13 @@ def detectAndCropFaceImage(imagePath, ext, width, height, confidenceValue, userI
             # ensure the face width and height are sufficiently large
             if fW < 20 or fH < 20:
                 return
-
-            if extension != '':
-                saveDetectedCropImage(userID, extension, face)
-            else:
-                saveDetectedCropImage(userID, ext, face)
+            if mode == "test":
+                saveDetectedCropTestingImage(userID, extension, face)
+            else :
+                if extension != '':
+                    saveDetectedCropImage(userID, extension, face)
+                else:
+                    saveDetectedCropImage(userID, ext, face)
             return face
 
 def saveDetectedCropImage(userID, ext, face):
@@ -393,6 +438,18 @@ def saveDetectedCropImage(userID, ext, face):
         os.makedirs('detectedCropImage/' + str(userID))
     cv2.imwrite(os.path.join(dirname, 'detectedCropImage/' + str(userID) + '/' + str(uuid.uuid4()) + ext), face)
     cv2.waitKey(0)
+
+def saveDetectedCropTestingImage(userID, ext, face):
+    global testingFileName
+    dirname = os.path.dirname(__file__)
+    if not os.path.exists('detectedCropTestingImage/' + str(userID)):
+        os.makedirs('detectedCropTestingImage/' + str(userID))
+    strUUID = str(uuid.uuid4())
+    cv2.imwrite(os.path.join(dirname, 'detectedCropTestingImage/' + str(userID) + '/' + strUUID + '.' + ext), face)
+    cv2.waitKey(0)
+
+    # continue testingProcess
+    testingFileName = 'detectedCropTestingImage/' + str(userID) + '/' + strUUID + '.' + ext
 
 def train_model():
     while True:
@@ -438,10 +495,138 @@ def train_model():
         # mark this task as done
         queue.task_done()
 
+
+@app.route("/face-recognition/api/v1.0/training" , methods=['GET'])
+def trainingProcess(num_iteration = 30):
+    # convolutional process
+    session = tf.Session()
+    session.run(tf.global_variables_initializer())
+    num_classes = len(classes)
+    x = tf.placeholder(tf.float32, shape=[None, img_size, img_size, num_channels], name='x')
+    ## labels
+    y_true = tf.placeholder(tf.float32, shape=[None, num_classes], name='y_true')
+    y_true_cls = tf.argmax(y_true, dimension=1)
+
+    layer_conv1 = train.create_convolutional_layer(input=x,
+                                             num_input_channels=num_channels,
+                                             conv_filter_size=filter_size_conv1,
+                                             num_filters=num_filters_conv1)
+    layer_conv2 = train.create_convolutional_layer(input=layer_conv1,
+                                             num_input_channels=num_filters_conv1,
+                                             conv_filter_size=filter_size_conv2,
+                                             num_filters=num_filters_conv2)
+
+    layer_conv3 = train.create_convolutional_layer(input=layer_conv2,
+                                             num_input_channels=num_filters_conv2,
+                                             conv_filter_size=filter_size_conv3,
+                                             num_filters=num_filters_conv3)
+
+    layer_flat = train.create_flatten_layer(layer_conv3)
+
+    layer_fc1 = train.create_fc_layer(input=layer_flat,
+                                num_inputs=layer_flat.get_shape()[1:4].num_elements(),
+                                num_outputs=fc_layer_size,
+                                use_relu=True)
+
+    layer_fc2 = train.create_fc_layer(input=layer_fc1,
+                                num_inputs=fc_layer_size,
+                                num_outputs=num_classes,
+                                use_relu=False)
+
+    y_pred = tf.nn.softmax(layer_fc2, name='y_pred')
+    y_pred_cls = tf.argmax(y_pred, dimension=1)
+    session.run(tf.global_variables_initializer())
+    cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits=layer_fc2, labels=y_true)
+    cost = tf.reduce_mean(cross_entropy)
+    optimizer = tf.train.AdamOptimizer(learning_rate=1e-4).minimize(cost)
+    correct_prediction = tf.equal(y_pred_cls, y_true_cls)
+    accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+
+    session.run(tf.global_variables_initializer())
+    saver = tf.train.Saver()
+    data = dataset.read_train_sets(train_path, img_size, classes, validation_size=validation_size)
+    global total_iterations
+    for i in range(total_iterations, total_iterations + num_iteration):
+        x_batch, y_true_batch, _, cls_batch = data.train.next_batch(batch_size)
+        x_valid_batch, y_valid_batch, _, valid_cls_batch = data.valid.next_batch(batch_size)
+        feed_dict_tr = {x: x_batch, y_true: y_true_batch}
+        feed_dict_val = {x: x_valid_batch, y_true: y_valid_batch}
+        session.run(optimizer, feed_dict=feed_dict_tr)
+        if i % int(data.train.num_examples / batch_size) == 0:
+            val_loss = session.run(cost, feed_dict=feed_dict_val)
+            epoch = int(i / int(data.train.num_examples / batch_size))
+            # show progress
+            acc = session.run(accuracy, feed_dict=feed_dict_tr)
+            val_acc = session.run(accuracy, feed_dict=feed_dict_val)
+            msg = "Training Epoch {0} --- Training Accuracy: {1:>6.1%}, Validation Accuracy: {2:>6.1%},  Validation Loss: {3:.3f}"
+            print(msg.format(epoch + 1, acc, val_acc, val_loss))
+            saver.save(session, 'train-model')
+
+    total_iterations += num_iteration
+    return jsonify({'status': 'success'})
+
+@app.route("/face-recognition/api/v1.0/user/testing" , methods=['POST'])
+@auth.login_required
+def testing():
+    if 'photos[]' in request.files.keys():
+        username = request.form['username']
+        user = User.query.filter_by(username=username).first()
+        uploaded_images = request.files.getlist('photos[]')
+        save_images_to_folder(uploaded_images, user, "test")
+        result = testingProcess(testingFileName)
+        if result[1] != username :
+            return jsonify({'status': result[0], 'predicted': result[1], 'confidence': result[2], 'isRecognized': 'false'})
+        return jsonify({'status': result[0], 'predicted': result[1], 'confidence': result[2], 'isRecognized': 'true'})
+
+
+def testingProcess(pathFile):
+    # First, pass the path of the image
+    dir_path = os.path.dirname(__file__)
+    image_path = pathFile
+    filename = os.path.join(dir_path, image_path)
+    image_size = 128
+    num_channels = 3
+    images = []
+    # Reading the image using OpenCV
+    image = cv2.imread(filename)
+    # Resizing the image to our desired size and preprocessing will be done exactly as done during training
+    image = cv2.resize(image, (image_size, image_size), 0, 0, cv2.INTER_LINEAR)
+    images.append(image)
+    images = np.array(images, dtype=np.uint8)
+    images = images.astype('float32')
+    images = np.multiply(images, 1.0 / 255.0)
+    # The input to the network is of shape [None image_size image_size num_channels]. Hence we reshape.
+    x_batch = images.reshape(1, image_size, image_size, num_channels)
+
+    ## Let us restore the saved model
+    sess = tf.Session()
+    # Step-1: Recreate the network graph. At this step only graph is created.
+    saver = tf.train.import_meta_graph('train-model.meta')
+    # Step-2: Now let's load the weights saved using the restore method.
+    saver.restore(sess, tf.train.latest_checkpoint('./'))
+
+    # Accessing the default graph which we have restored
+    graph = tf.get_default_graph()
+
+    # Now, let's get hold of the op that we can be processed to get the output.
+    # In the original network y_pred is the tensor that is the prediction of the network
+    y_pred = graph.get_tensor_by_name("y_pred:0")
+    ## Let's feed the images to the input placeholders
+    x = graph.get_tensor_by_name("x:0")
+    y_true = graph.get_tensor_by_name("y_true:0")
+
+    y_test_images = np.zeros((1, len(os.listdir('detectedCropImage'))))
+    ### Creating the feed_dict that is required to be fed to calculate y_pred
+    feed_dict_testing = {x: x_batch, y_true: y_test_images}
+    result = sess.run(y_pred, feed_dict=feed_dict_testing)
+    maxIndex = np.argmax(result)
+    id = os.listdir('detectedCropImage')[maxIndex]
+    predicted = User.query.filter_by(id=int(id)).first()
+    return ["success", predicted.username, str(result[0,maxIndex])]
+
 @app.route('/')
 def hello_world():
     return 'Hello World!'
-
 
 #configure queue for training models
 queue = Queue(maxsize=0)
