@@ -2,3 +2,8 @@ venv
 .idea
 lib
 bin
+models
+detectedCropImage
+images
+facerecognition1.sqlite
+__pycache__

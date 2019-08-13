@@ -84,7 +84,7 @@ class DataSet(object):
       self._epochs_done += 1
       start = 0
       self._index_in_epoch = batch_size
-      assert batch_size <= self._num_examples
+      #assert batch_size <= self._num_examples
     end = self._index_in_epoch
 
     return self._images[start:end], self._labels[start:end], self._img_names[start:end], self._cls[start:end]
