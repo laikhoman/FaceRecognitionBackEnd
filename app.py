@@ -68,6 +68,8 @@ num_filters_conv3 = 64
 
 fc_layer_size = 128
 
+PADDING = 50
+
 #model / users is a many to many relationship, that means there's a third #table containing user id and model id
 
 users_models = db.Table('users_models',
@@ -246,8 +248,6 @@ def login():
         token = g.user.generate_auth_token(user.id)
         return jsonify({'token': token.decode('ascii')})
 
-
-
 @app.route('/face-recognition/api/v1.0/token')
 @auth.login_required
 def get_auth_token():
@@ -331,43 +331,55 @@ def save_images_to_folder(images_to_save, user, mode):
         allUsers = User.query.order_by(User.id.asc()).all()
         num_classes = len(allUsers)
         print(num_classes)
+
         if num_classes > 1:
             model = Model.query.order_by(Model.version.desc()).first()
+            print("model", model)
             if model is not None:
                 # increment the version
                 latestModelVersion = (Model.query.order_by(Model.version.desc()).first()).version
+                print("version up: ", latestModelVersion + 1)
                 queue.put(latestModelVersion + 1)
             else:
                 # create first version
                 queue.put(1)
+            # print("queue size: ", queue.qsize())
+            # if queue.qsize() == 0:
+            #     queue.put(1)
+            # else:
+            #     latestModelVersion = queue.get()
+            #     print("version up: ", latestModelVersion + 1)
+            #     queue.put(latestModelVersion + 1)
     elif mode == "addPhotos":
         j = 0
         for image in images_to_save:
             detectAndCropFaceImage('images/' + str(user.id) + '/' + fileNameList[j], '', 300, 300, 0.6, user.id, extList[j], mode)
             j = j + 1
-        # if len(classes) > 1:
-        #     model = Model.query.order_by(Model.version.desc()).first()
-        #     if model is not None:
-        #         # increment the version
-        #         latestModelVersion = (Model.query.order_by(Model.version.desc()).first()).version
-        #         queue.put(latestModelVersion + 1)
-        #     else:
-        #         # create first version
-        #         queue.put(1)
+        allUsers = User.query.order_by(User.id.asc()).all()
+        num_classes = len(allUsers)
+        print(num_classes)
+        if num_classes > 1:
+            model = Model.query.order_by(Model.version.desc()).first()
+            print("model", model)
+            if model is not None:
+                # increment the version
+                latestModelVersion = (Model.query.order_by(Model.version.desc()).first()).version
+                print("version up: ", latestModelVersion)
+                queue.put(latestModelVersion + 1)
+            else:
+                # create first version
+                queue.put(1)
+            # if queue.qsize() == 0:
+            #     queue.put(1)
+            # else:
+            #     latestModelVersion = queue.get()
+            #     print("version up: ", latestModelVersion + 1)
+            #     queue.put(latestModelVersion + 1)
     elif mode == "test":
         j = 0
         for image in images_to_save:
             detectAndCropFaceImage('testingImages/' + str(user.id) + '/' + fileNameList[j], '', 300, 300, 0.6, user.id,extList[j], mode)
             j = j + 1
-
-    # get the last trained model
-    model = Model.query.order_by(Model.version.desc()).first()
-    if model is not None:
-        # increment the version
-        Queue().put(model.version + 1)
-    else:
-        # create first version
-        Queue().put(1)
 
 @app.route('/private')
 @auth.login_required
@@ -447,8 +459,13 @@ def detectAndCropFaceImage(imagePath, ext, width, height, confidenceValue, userI
             # the face
             box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
             (startX, startY, endX, endY) = box.astype("int")
+            x1 = startX - PADDING
+            y1 = startY - PADDING
+            x2 = endX + PADDING
+            y2 = endY + PADDING
             # extract the face ROI and grab the ROI dimensions
-            face = image[startY:endY, startX:endX]
+            #face = image[startY:endY, startX:endX]
+            face = image[max(0, startY):min(endY, y2), max(0, startX):min(endX, x2)]
             (fH, fW) = face.shape[:2]
             # ensure the face width and height are sufficiently large
             if fW < 20 or fH < 20:
@@ -482,112 +499,22 @@ def saveDetectedCropTestingImage(userID, ext, face):
     # continue testingProcess
     testingFileName = 'detectedCropTestingImage/' + str(userID) + '/' + strUUID + '.' + ext
 
-# @app.route("/face-recognition/api/v1.0/training" , methods=['GET'])
-# def trainingProcess(num_iteration = 30):
-#     while True:
-#         # convolutional process
-#         session = tf.Session()
-#         session.run(tf.global_variables_initializer())
-#         num_classes = User.count()
-#         x = tf.placeholder(tf.float32, shape=[None, img_size, img_size, num_channels], name='x')
-#         ## labels
-#         y_true = tf.placeholder(tf.float32, shape=[None, num_classes], name='y_true')
-#         y_true_cls = tf.argmax(y_true, dimension=1)
-#
-#         layer_conv1 = train.create_convolutional_layer(input=x,
-#                                                  num_input_channels=num_channels,
-#                                                  conv_filter_size=filter_size_conv1,
-#                                                  num_filters=num_filters_conv1)
-#         layer_conv2 = train.create_convolutional_layer(input=layer_conv1,
-#                                                  num_input_channels=num_filters_conv1,
-#                                                  conv_filter_size=filter_size_conv2,
-#                                                  num_filters=num_filters_conv2)
-#
-#         layer_conv3 = train.create_convolutional_layer(input=layer_conv2,
-#                                                  num_input_channels=num_filters_conv2,
-#                                                  conv_filter_size=filter_size_conv3,
-#                                                  num_filters=num_filters_conv3)
-#
-#         layer_flat = train.create_flatten_layer(layer_conv3)
-#
-#         layer_fc1 = train.create_fc_layer(input=layer_flat,
-#                                     num_inputs=layer_flat.get_shape()[1:4].num_elements(),
-#                                     num_outputs=fc_layer_size,
-#                                     use_relu=True)
-#
-#         layer_fc2 = train.create_fc_layer(input=layer_fc1,
-#                                     num_inputs=fc_layer_size,
-#                                     num_outputs=num_classes,
-#                                     use_relu=False)
-#
-#         y_pred = tf.nn.softmax(layer_fc2, name='y_pred')
-#         y_pred_cls = tf.argmax(y_pred, dimension=1)
-#         session.run(tf.global_variables_initializer())
-#         cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits=layer_fc2, labels=y_true)
-#         cost = tf.reduce_mean(cross_entropy)
-#         optimizer = tf.train.AdamOptimizer(learning_rate=1e-4).minimize(cost)
-#         correct_prediction = tf.equal(y_pred_cls, y_true_cls)
-#         accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
-#
-#         session.run(tf.global_variables_initializer())
-#         saver = tf.train.Saver(save_relative_paths=True)
-#         data = dataset.read_train_sets(train_path, img_size, classes, validation_size=validation_size)
-#         global total_iterations
-#         # use the model version to construct a filename
-#
-#         # get the next version
-#         nextVersion = queue.get()
-#         filename = 'Faces_v' + str(nextVersion)
-#         if not os.path.exists('models/'):
-#             os.makedirs('models/')
-#         models_folder = 'models/'
-#
-#         for i in range(total_iterations, total_iterations + num_iteration):
-#             x_batch, y_true_batch, _, cls_batch = data.train.next_batch(batch_size)
-#             x_valid_batch, y_valid_batch, _, valid_cls_batch = data.valid.next_batch(batch_size)
-#             feed_dict_tr = {x: x_batch, y_true: y_true_batch}
-#             feed_dict_val = {x: x_valid_batch, y_true: y_valid_batch}
-#             session.run(optimizer, feed_dict=feed_dict_tr)
-#             if i % int(data.train.num_examples / batch_size) == 0:
-#                 val_loss = session.run(cost, feed_dict=feed_dict_val)
-#                 epoch = int(i / int(data.train.num_examples / batch_size))
-#                 # show progress
-#                 acc = session.run(accuracy, feed_dict=feed_dict_tr)
-#                 val_acc = session.run(accuracy, feed_dict=feed_dict_val)
-#                 msg = "Training Epoch {0} --- Training Accuracy: {1:>6.1%}, Validation Accuracy: {2:>6.1%},  Validation Loss: {3:.3f}"
-#                 print(msg.format(epoch + 1, acc, val_acc, val_loss))
-#
-#                 saver.save(session, models_folder + filename)
-#
-#         total_iterations += num_iteration
-#
-#         # save model data in database
-#         modelData = Model(nextVersion, models_folder + filename)
-#         for userId in classes:
-#             if userId != '.DS_Store':
-#                 user = User.query.filter_by(id=int(userId)).first()
-#                 if user is not None:
-#                     modelData.users.append(user)
-#         db.session.add(modelData)
-#         db.session.commit()
-#         logging.debug('done creating model')
-#         # mark this task as done
-#         queue.task_done()
-#
-#     return jsonify({'status': 'success'})
-
 @app.route("/face-recognition/api/v1.0/training" , methods=['GET'])
 def trainingProcess(num_iteration = 1000):
     while True:
-        # convolutional process
-        session = tf.Session()
-        session.run(tf.global_variables_initializer())
+        version = queue.get()
+        print("version ", version)
         allUsers = User.query.order_by(User.id.asc()).all()
         num_classes = len(allUsers)
-        print(num_classes)
         classes = []
         for i in range(num_classes):
             classes.append(str(allUsers[i].id))
+        print(classes)
+        print(len(classes))
+
+        # convolutional process
+        session = tf.Session()
+        session.run(tf.global_variables_initializer())
         x = tf.placeholder(tf.float32, shape=[None, img_size, img_size, num_channels], name='x')
         ## labels
         y_true = tf.placeholder(tf.float32, shape=[None, num_classes], name='y_true')
@@ -629,23 +556,25 @@ def trainingProcess(num_iteration = 1000):
         accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
         session.run(tf.global_variables_initializer())
-        saver = tf.train.Saver(save_relative_paths=True)
+        saver = tf.train.Saver()
         data = dataset.read_train_sets(train_path, img_size, classes, validation_size=validation_size)
         global total_iterations
-        # use the model version to construct a filename
 
-        # get the next version
-        # nextVersion = -1
-        # model = Model.query.order_by(Model.version.desc()).first()
-        # if model is None:
-        #     nextVersion = 1
-        # else:
-        #     nextVersion = (Model.query.order_by(Model.version.desc()).first()).version + 1
-        version = queue.get()
+        # use the model version to construct a filename
         filename = 'Faces_v' + str(version)
         if not os.path.exists('models/'):
             os.makedirs('models/')
         models_folder = 'models/'
+
+        # save model data in database
+        modelData = Model(version, models_folder + filename)
+        for userId in classes:
+            if userId != '.DS_Store':
+                user = User.query.filter_by(id=int(userId)).first()
+                if user is not None:
+                    modelData.users.append(user)
+        db.session.add(modelData)
+        db.session.commit()
 
         for i in range(total_iterations, total_iterations + num_iteration):
             x_batch, y_true_batch, _, cls_batch = data.train.next_batch(batch_size)
@@ -661,24 +590,10 @@ def trainingProcess(num_iteration = 1000):
                 val_acc = session.run(accuracy, feed_dict=feed_dict_val)
                 msg = "Training Epoch {0} --- Training Accuracy: {1:>6.1%}, Validation Accuracy: {2:>6.1%},  Validation Loss: {3:.3f}"
                 print(msg.format(epoch + 1, acc, val_acc, val_loss))
-
                 saver.save(session, models_folder + filename)
 
         total_iterations += num_iteration
-
-        # save model data in database
-        # modelData = Model(nextVersion, models_folder + filename)
-        modelData = Model(version, models_folder + filename)
-        for userId in classes:
-            if userId != '.DS_Store':
-                user = User.query.filter_by(id=int(userId)).first()
-                if user is not None:
-                    modelData.users.append(user)
-        db.session.add(modelData)
-        db.session.commit()
         logging.debug('done creating model')
-
-        print("version ", version)
         queue.task_done()
     return jsonify({'status': 'success'})
 
@@ -751,24 +666,6 @@ def testingProcess(pathFile):
 @app.route('/')
 def hello_world():
     return 'Hello World!'
-
-xyz = 0
-@app.route("/face-recognition/api/v1.0/user/abc" , methods=['GET'])
-def abc():
-    global xyz
-    xyz = xyz + 1
-    queue.put(xyz)
-    return jsonify({'status': 'ok'})
-
-def looping():
-    while True:
-        abc = queue.get()
-        time.sleep(10)
-        print("abc ", abc)
-        queue.task_done()
-        # abc = queue.get()
-        # queue.task_done()
-        # print("abc")
 
 # configure queue for training models
 queue = Queue(maxsize=0)
